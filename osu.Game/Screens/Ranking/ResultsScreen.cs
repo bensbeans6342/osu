@@ -18,6 +18,7 @@ using osu.Framework.Graphics.Shapes;
 using osu.Framework.Input.Bindings;
 using osu.Framework.Input.Events;
 using osu.Framework.Screens;
+using osu.Framework.Utils;
 using osu.Game.Audio;
 using osu.Game.Graphics;
 using osu.Game.Graphics.Containers;
@@ -26,6 +27,7 @@ using osu.Game.Input.Bindings;
 using osu.Game.Localisation;
 using osu.Game.Online.Placeholders;
 using osu.Game.Overlays;
+using osu.Game.Rulesets.Mods;
 using osu.Game.Scoring;
 using osu.Game.Screens.Play;
 using osu.Game.Screens.Ranking.Expanded.Accuracy;
@@ -45,6 +47,8 @@ namespace osu.Game.Screens.Ranking
 
         public override bool? AllowGlobalTrackControl => true;
 
+        public override bool? ApplyModTrackAdjustments => false;
+
         protected override OverlayActivation InitialOverlayActivationMode => OverlayActivation.UserTriggered;
 
         public readonly Bindable<ScoreInfo?> SelectedScore = new Bindable<ScoreInfo?>();
@@ -57,6 +61,9 @@ namespace osu.Game.Screens.Ranking
 
         [Resolved]
         private Player? player { get; set; }
+
+        [Resolved]
+        private MusicController musicController { get; set; } = null!;
 
         private bool skipExitTransition;
 
@@ -403,12 +410,84 @@ namespace osu.Game.Screens.Ranking
             bottomPanel.FadeTo(1, 250);
 
             popInSample?.Play();
+
+            SelectedScore.BindValueChanged(_ => updateTrackRateForSelectedScore(), true);
         }
 
+        public override void OnSuspending(ScreenTransitionEvent e)
+        {
+            clearTrackRate();
+
+            base.OnSuspending(e);
+        }
+
+        public override void OnResuming(ScreenTransitionEvent e)
+        {
+            base.OnResuming(e);
+
+            updateTrackRateForSelectedScore();
+        }
+
+        #region Mod rate playback
+
+        private AudioAdjustments? scoreTrackAdjustments;
+
+        private double appliedTrackRate = 1;
+
+        /// <summary>
+        /// Plays the music at the rate of the rate-changing mods (DT, HT, NC, DC, etc.) of the selected score.
+        /// </summary>
+        private void updateTrackRateForSelectedScore()
+        {
+            musicController.ResetTrackAdjustments();
+            scoreTrackAdjustments = null;
+
+            double rate = 1;
+
+            var score = SelectedScore.Value;
+
+            if (score?.BeatmapInfo != null && Beatmap.Value.BeatmapInfo.Equals(score.BeatmapInfo))
+            {
+                var ruleset = score.Ruleset.CreateInstance();
+                var rateMods = score.APIMods.Select(m => m.ToMod(ruleset)).OfType<IApplicableToRate>().ToArray();
+
+                if (rateMods.Length > 0)
+                {
+                    scoreTrackAdjustments = new AudioAdjustments();
+
+                    foreach (var mod in rateMods)
+                    {
+                        mod.ApplyToTrack(scoreTrackAdjustments);
+                        rate = mod.ApplyToRate(0, rate);
+                    }
+
+                    musicController.CurrentTrack.BindAdjustments(scoreTrackAdjustments);
+                }
+            }
+        
+            if (Precision.AlmostEquals(rate, appliedTrackRate))
+                return;
+
+            appliedTrackRate = rate;
+
+            Beatmap.Value.PrepareTrackForPreview(false);
+            musicController.Play(true);
+        }
+
+        private void clearTrackRate()
+        {
+            musicController.ResetTrackAdjustments();
+            scoreTrackAdjustments = null;
+            appliedTrackRate = 1;
+        }
+
+        #endregion
         public override bool OnExiting(ScreenExitEvent e)
         {
             if (base.OnExiting(e))
                 return true;
+
+            clearTrackRate();
 
             // This is a stop-gap safety against components holding references to gameplay after exiting the gameplay flow.
             // Right now, HitEvents are only used up to the results screen. If this changes in the future we need to remove
